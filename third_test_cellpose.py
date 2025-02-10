@@ -9,7 +9,7 @@ from cellpose import models, plot
 
 # === SETTINGS ===
 UPSCALE_FACTOR = 4  # Set >1 to upscale (e.g., 2 for 2× zoom), or 1 for no upscaling
-CROP_IMAGE = True  # Set True to use only the middle left 1/16 of the image
+CROP_IMAGE = True
 
 # === SETUP OUTPUT DIRECTORY ===
 output_dir = "results"
@@ -45,7 +45,7 @@ if image.ndim == 3:
 # === CROP IMAGE (Middle-Left 1/16) ===
 if CROP_IMAGE:
     h, w = image.shape
-    image = image[h // 8: h // 6, w // 4 : w // 2]  # Middle-left 1/32th
+    image = image[h // 8: h // 6, w // 4 : w // 3.5]
     print(f"Cropped Image Shape: {image.shape}")
 
 
@@ -75,8 +75,7 @@ masks, flows, styles, diams = model.eval(
     channels=[0, 0],
     flow_threshold=0.5,
     cellprob_threshold=-2,
-    resample=True,
-    stitch_threshold=0.1
+    resample=True
 )
 
 # === SAVE MASK IMAGE ===
