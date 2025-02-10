@@ -8,8 +8,9 @@ from skimage.measure import regionprops_table, label
 from cellpose import models, plot
 
 # === SETTINGS ===
-UPSCALE_FACTOR = 4  # Set >1 to upscale (e.g., 2 for 2× zoom), or 1 for no upscaling
+UPSCALE_FACTOR = 1  # Set >1 to upscale (e.g., 2 for 2× zoom), or 1 for no upscaling
 CROP_IMAGE = True
+enhance_gray_parts = False
 
 # === SETUP OUTPUT DIRECTORY ===
 output_dir = "results"
@@ -42,10 +43,10 @@ if image.ndim == 3:
     image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
     print("Converted image to grayscale.")
 
-# === CROP IMAGE (Middle-Left 1/16) ===
+# === CROP IMAGE ===
 if CROP_IMAGE:
     h, w = image.shape
-    image = image[h // 8: h // 6, w // 4 : w // 3.5]
+    image = image[h // 4: h // 3, w // 3 : w // 2]
     print(f"Cropped Image Shape: {image.shape}")
 
 
@@ -63,15 +64,36 @@ print(f"Saved processed grayscale image: {gray_image_path}")
 print(f"Image min: {image.min()}, max: {image.max()}, mean: {image.mean()}")
 
 # === CONTRAST ENHANCEMENT (CLAHE) ===
-clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+clahe = cv2.createCLAHE(clipLimit=5.0, tileGridSize=(16, 16))
 image = clahe.apply(image)
+
+# === ENHANCE DIM REGIONS ===
+if enhance_gray_parts:
+    # Estimate the background using a large kernel
+    background = cv2.GaussianBlur(image, (101, 101), 0)
+
+    # Subtract the background from the original image
+    foreground = cv2.subtract(image, background)
+
+    # Normalize the foreground to enhance contrast
+    foreground = cv2.normalize(foreground, None, 0, 255, cv2.NORM_MINMAX)
+
+    # Save and display the foreground image
+    skio.imsave(os.path.join(output_dir, "foreground_image.png"), foreground)
+    plt.imshow(foreground, cmap="gray")
+    plt.title("Foreground Image (Background Subtracted)")
+    plt.axis("off")
+    plt.show()
+
+else:
+    foreground = image
 
 # === RUN CELLPOSE SEGMENTATION ===
 model = models.Cellpose(model_type='nuclei', gpu=torch.cuda.is_available())
 
 masks, flows, styles, diams = model.eval(
-    image,
-    diameter=4 * UPSCALE_FACTOR,  # Adjust diameter if upscaled.
+    foreground,
+    diameter=5 * UPSCALE_FACTOR,  # Adjust diameter if upscaled.
     channels=[0, 0],
     flow_threshold=0.5,
     cellprob_threshold=-2,
