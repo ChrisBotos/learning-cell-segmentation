@@ -64,7 +64,7 @@ print(f"Saved processed grayscale image: {gray_image_path}")
 print(f"Image min: {image.min()}, max: {image.max()}, mean: {image.mean()}")
 
 # === CONTRAST ENHANCEMENT (CLAHE) ===
-clahe = cv2.createCLAHE(clipLimit=5.0, tileGridSize=(16, 16))
+clahe = cv2.createCLAHE(clipLimit=10.0, tileGridSize=(16, 16))
 image = clahe.apply(image)
 
 # === ENHANCE DIM REGIONS ===
@@ -89,14 +89,14 @@ else:
     foreground = image
 
 # === RUN CELLPOSE SEGMENTATION ===
-model = models.Cellpose(model_type='nuclei', gpu=torch.cuda.is_available())
+model = models.Cellpose(model_type='nuclei',gpu=torch.cuda.is_available())
 
 masks, flows, styles, diams = model.eval(
     foreground,
     diameter=5 * UPSCALE_FACTOR,  # Adjust diameter if upscaled.
     channels=[0, 0],
-    flow_threshold=0.7,
-    cellprob_threshold=-4,
+    flow_threshold=0.5,
+    cellprob_threshold=-2,
     resample=True
 )
 
@@ -135,7 +135,15 @@ props = regionprops_table(labeled_mask, intensity_image=image,
                           properties=['area', 'perimeter', 'mean_intensity'])
 
 cell_sizes = props["area"]
-cell_circularities = 4 * np.pi * (props["area"] / (props["perimeter"] ** 2 + 1e-5))
+valid_indices = props["perimeter"] > 5  # Ignore objects with tiny perimeters
+cell_circularities = np.zeros_like(cell_sizes, dtype=np.float32)
+cell_circularities[valid_indices] = (
+    4 * np.pi * props["area"][valid_indices] / (props["perimeter"][valid_indices] ** 2)
+)
+
+# Set unrealistic circularities to NaN
+cell_circularities[(cell_circularities < 0) | (cell_circularities > 1)] = np.nan
+
 mean_intensities = props["mean_intensity"]
 
 plt.hist(cell_sizes, bins=50, edgecolor="black")
@@ -148,6 +156,6 @@ plt.show()
 print(f"Detected {len(cell_sizes)} cells.")
 if len(cell_sizes) > 0:
     print(f"Average cell size: {np.mean(cell_sizes):.2f} pixels.")
-    print(f"Average circularity: {np.mean(cell_circularities):.3f}.")
+    print(f"Average circularity: {np.mean(cell_circularities[(cell_circularities >= 0) & (cell_circularities <= 1)])}")
 else:
     print("No cells detected, try adjusting the thresholds.")
