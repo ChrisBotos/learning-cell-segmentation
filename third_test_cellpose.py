@@ -46,7 +46,7 @@ if image.ndim == 3:
 # === CROP IMAGE ===
 if CROP_IMAGE:
     h, w = image.shape
-    image = image[h // 4: h // 3, w // 3 : w // 2]
+    image = image[h // 3: h // 2, : w // 2]
     print(f"Cropped Image Shape: {image.shape}")
 
 
@@ -95,8 +95,8 @@ masks, flows, styles, diams = model.eval(
     foreground,
     diameter=5 * UPSCALE_FACTOR,  # Adjust diameter if upscaled.
     channels=[0, 0],
-    flow_threshold=0.5,
-    cellprob_threshold=-2,
+    flow_threshold=0.8,
+    cellprob_threshold=-1,
     resample=True
 )
 
