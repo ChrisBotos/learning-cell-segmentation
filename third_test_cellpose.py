@@ -10,7 +10,7 @@ from cellpose import models, plot
 # === SETTINGS ===
 UPSCALE_FACTOR = 1  # Set >1 to upscale (e.g., 2 for 2× zoom), or 1 for no upscaling
 CROP_IMAGE = True
-enhance_gray_parts = False
+enhance_dim = True
 image_path = "DAPI_bIRI2.tif"
 
 # === SETUP OUTPUT DIRECTORY ===
@@ -46,7 +46,7 @@ if image.ndim == 3:
 # === CROP IMAGE ===
 if CROP_IMAGE:
     h, w = image.shape
-    image = image[4*h//8: 5*h//8, 4*w//8 : 5*w//8]
+    image = image[4*h//8: 6*h//8, 4*w//8 : 5*w//8]
     print(f"Cropped Image Shape: {image.shape}")
 
 
@@ -64,40 +64,25 @@ print(f"Saved processed grayscale image: {gray_image_path}")
 print(f"Image min: {image.min()}, max: {image.max()}, mean: {image.mean()}")
 
 # === CONTRAST ENHANCEMENT (CLAHE) ===
-clahe = cv2.createCLAHE(clipLimit=10.0, tileGridSize=(16, 16))
+clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
 image = clahe.apply(image)
 
 # === ENHANCE DIM REGIONS ===
-if enhance_gray_parts:
-    # Estimate the background using a large kernel
-    background = cv2.GaussianBlur(image, (101, 101), 0)
-
-    # Subtract the background from the original image
-    foreground = cv2.subtract(image, background)
-
-    # Normalize the foreground to enhance contrast
-    foreground = cv2.normalize(foreground, None, 0, 255, cv2.NORM_MINMAX)
-
-    # Save and display the foreground image
-    skio.imsave(os.path.join(output_dir, "foreground_image.png"), foreground)
-    plt.imshow(foreground, cmap="gray")
-    plt.title("Foreground Image (Background Subtracted)")
-    plt.axis("off")
-    plt.show()
-
-else:
-    foreground = image
+if enhance_dim:
+    gamma = 1.5  # Try 1.5 - 2.0
+    lookup_table = np.array([((i / 255.0) ** (1.0 / gamma)) * 255 for i in range(256)]).astype("uint8")
+    image = cv2.LUT(image, lookup_table)
 
 # === RUN CELLPOSE SEGMENTATION ===
 model = models.Cellpose(model_type='nuclei',gpu=torch.cuda.is_available())
 
 masks, flows, styles, diams = model.eval(
-    foreground,
-    diameter=5 * UPSCALE_FACTOR,  # Adjust diameter if upscaled.
-    channels=[0, 0],
-    flow_threshold=0.5,
+    image,
+    diameter=7 * UPSCALE_FACTOR,  # Adjust diameter if upscaled.
+    channels=[0, 1],
+    flow_threshold=0.7,
     cellprob_threshold=-2,
-    resample=True
+    resample=False
 )
 
 # === SAVE MASK IMAGE ===
