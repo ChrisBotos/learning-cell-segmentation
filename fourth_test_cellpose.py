@@ -51,7 +51,7 @@ if UPSCALE_FACTOR > 1:
 
 # TODO remove
 h, w = image.shape
-image = image[h // 3: h // 2, : w // 2]
+image = image[h // 2:,w // 2 : ]
 print(f"Cropped Image Shape: {image.shape}")
 
 # === SPLIT IMAGE INTO REGIONS ===
@@ -103,16 +103,22 @@ print("Combining the masks of all parts...")
 final_mask_path = os.path.join(output_dir, "final_segmentation_mask.png")
 skio.imsave(final_mask_path, masks_combined.astype(np.uint16))
 
+
+# === RELABEL MASKS ===
+labeled_mask = label(masks_combined)
+
+# === OPTIMIZE COLOR ASSIGNMENT ===
+unique_labels = np.unique(labeled_mask)
+color_map = np.random.rand(len(unique_labels), 3)  # Assign colors only to existing labels
+
 # === CREATE & SAVE MASK OVERLAY ===
 print("Creating and saving mask overlay...")
-mask_overlay = plot.mask_overlay(image, masks_combined, colors=np.random.rand(np.max(masks_combined) + 1, 3))
+mask_overlay = plot.mask_overlay(image, labeled_mask, colors=color_map)
 overlay_path = os.path.join(output_dir, "final_mask_overlay.png")
 skio.imsave(overlay_path, (mask_overlay * 255).astype(np.uint8))
 print(f"Saved final mask overlay: {overlay_path}")
 
-# === RELABEL MASKS TO AVOID LABEL OVERLAPS ===
-print("Relabeling combined mask to avoid label overlaps...")
-labeled_mask = label(masks_combined)  # Relabels mask correctly
+
 
 # === EXTRACT CELL FEATURES ===
 print("Extracting cell features...")

@@ -5,16 +5,16 @@ import cv2
 import matplotlib.pyplot as plt
 from skimage import io as skio
 from skimage.measure import regionprops_table, label
-from cellpose import models, plot
+from stardist.models import StarDist2D
+from csbdeep.utils import normalize
 
 # === SETTINGS ===
 UPSCALE_FACTOR = 1  # Set >1 to upscale (e.g., 2 for 2× zoom), or 1 for no upscaling
 CROP_IMAGE = True
 enhance_gray_parts = False
-image_path = "DAPI_bIRI2.tif"
 
 # === SETUP OUTPUT DIRECTORY ===
-output_dir = "results"
+output_dir = "results/experiment_01/results"
 os.makedirs(output_dir, exist_ok=True)
 
 # === GPU CHECK ===
@@ -25,6 +25,7 @@ if torch.cuda.is_available():
     print("GPU name:", torch.cuda.get_device_name(0))
 
 # === LOAD IMAGE ===
+image_path = "DAPI_bIRI2.tif"
 image = skio.imread(image_path)
 print(f"Original Image: dtype={image.dtype}, shape={image.shape}")
 
@@ -48,7 +49,6 @@ if CROP_IMAGE:
     h, w = image.shape
     image = image[h // 3: h // 2, : w // 2]
     print(f"Cropped Image Shape: {image.shape}")
-
 
 # === UPSCALE IMAGE ===
 if UPSCALE_FACTOR > 1:
@@ -84,34 +84,35 @@ if enhance_gray_parts:
     plt.title("Foreground Image (Background Subtracted)")
     plt.axis("off")
     plt.show()
-
 else:
     foreground = image
 
-# === RUN CELLPOSE SEGMENTATION ===
-model = models.Cellpose(model_type='nuclei', gpu=torch.cuda.is_available())
+# === RUN STAR DIST SEGMENTATION ===
+print("Running StarDist segmentation...")
+model = StarDist2D.from_pretrained("2D_versatile_fluo")
 
-masks, flows, styles, diams = model.eval(
-    foreground,
-    diameter=5 * UPSCALE_FACTOR,  # Adjust diameter if upscaled.
-    channels=[0, 0],
-    flow_threshold=0.8,
-    cellprob_threshold=-1,
-    resample=True
-)
+# Normalize the image for StarDist
+normalized_image = normalize(foreground, 1, 99.8)
+
+# Get segmentation results
+labels, _ = model.predict_instances(normalized_image)
 
 # === SAVE MASK IMAGE ===
 mask_path = os.path.join(output_dir, "segmentation_mask.png")
-skio.imsave(mask_path, masks.astype(np.uint16))  # Save as 16-bit mask
+skio.imsave(mask_path, labels.astype(np.uint16))  # Save as 16-bit mask
 
 # === NORMALIZE & SAVE MASK FOR VISUALIZATION ===
-normalized_mask = (masks / masks.max() * 255).astype(np.uint8) if masks.max() > 0 else masks
+normalized_mask = (labels / labels.max() * 255).astype(np.uint8) if labels.max() > 0 else labels
 cv2.imwrite(os.path.join(output_dir, "segmentation_mask_visual.png"), normalized_mask)
 
 # === CREATE & SAVE MASK OVERLAY ===
-mask_overlay = plot.mask_overlay(image, masks, colors=np.random.rand(np.max(masks) + 1, 3))
+overlay = np.zeros((*labels.shape, 3), dtype=np.uint8)
+overlay[..., 0] = (labels % 256).astype(np.uint8)  # Random color per nucleus
+overlay[..., 1] = ((labels // 256) % 256).astype(np.uint8)
+overlay[..., 2] = ((labels // 65536) % 256).astype(np.uint8)
+
 overlay_path = os.path.join(output_dir, "mask_overlay.png")
-skio.imsave(overlay_path, (mask_overlay * 255).astype(np.uint8))
+skio.imsave(overlay_path, overlay)
 print(f"Saved mask overlay: {overlay_path}")
 
 # === DISPLAY RESULTS ===
@@ -122,15 +123,15 @@ plt.title("Processed DAPI Image")
 plt.axis("off")
 
 plt.subplot(1, 2, 2)
-plt.imshow(mask_overlay)
-plt.title("Cellpose Segmentation Mask")
+plt.imshow(overlay)
+plt.title("StarDist Segmentation Mask")
 plt.axis("off")
 
 plt.savefig(os.path.join(output_dir, "mask_overlay_plot.png"), dpi=300)
 plt.show()
 
 # === EXTRACT CELL FEATURES ===
-labeled_mask = label(masks)
+labeled_mask = label(labels)
 props = regionprops_table(labeled_mask, intensity_image=image,
                           properties=['area', 'perimeter', 'mean_intensity'])
 
