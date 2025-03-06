@@ -1,2 +1,4 @@
 cropped_image.png
 DAPI*
+results/*
+!results/.gitkeep
