@@ -5,171 +5,244 @@ import cv2
 import matplotlib.pyplot as plt
 from skimage import io as skio
 from skimage.measure import regionprops_table, label
-from skimage.morphology import white_tophat, disk
-from skimage.restoration import denoise_nl_means, estimate_sigma
-from scipy.ndimage import distance_transform_edt
-from skimage.segmentation import watershed
 from cellpose import models, plot
 
-"""TITLE: DAPI-Stained Nuclei Segmentation Pipeline"""
-
 # === SETTINGS ===
-UPSCALE_FACTOR = 1  # Set >1 to upscale (e.g., 2 for 2× zoom), or 1 for no upscaling.
-CROP_IMAGE = True  # Enable cropping to focus on a specific region.
-enhance_dim = True  # Whether to enhance dim regions using gamma correction.
-image_path = "DAPI_bIRI2.tif"  # Path to the input image.
+UPSCALE_FACTOR = 1  # Set >1 to upscale (e.g., 2 for 2× zoom), or 1 for no upscaling
+CROP_IMAGE = True
+enhance_dim = True
+image_path = "DAPI_bIRI2.tif"
 
 # === SETUP OUTPUT DIRECTORY ===
 output_dir = "results"
 os.makedirs(output_dir, exist_ok=True)
 
-# === CHECK GPU AVAILABILITY ===
+# === GPU CHECK ===
+print("=== Checking GPU Availability ===")
 torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {torch_device}")
 if torch.cuda.is_available():
     print("GPU name:", torch.cuda.get_device_name(0))
 
+
+def convert_16bit_to_8bit(image):
+    """
+    Converts a 16-bit grayscale image to 8-bit using contrast stretching.
+
+    - Uses the 1st and 99th percentile instead of min/max to reduce the effect of outliers.
+    - Ensures that images with zero intensity variation do not cause division errors.
+
+    Parameters:
+        image (numpy.ndarray): 16-bit grayscale image.
+
+    Returns:
+        numpy.ndarray: 8-bit grayscale image.
+    """
+
+    if image.dtype != np.uint16:
+        return image  # Return unchanged if already 8-bit or another format.
+
+    # Compute percentiles for contrast stretching (ignore extreme outliers)
+    p1, p99 = np.percentile(image, (1, 99))
+
+    # Prevent division by zero if the image has uniform intensity
+    if p99 - p1 == 0:
+        p1, p99 = image.min(), image.max()
+
+    # Apply normalization to 8-bit range (0-255)
+    image_8bit = np.clip((image - p1) / (p99 - p1) * 255, 0, 255).astype(np.uint8)
+
+    print("Converted 16-bit image to 8-bit with contrast stretching.")
+
+    return image_8bit
+
+
+import numpy as np
+import cv2
+
+def adaptive_gamma_correction(image, min_gamma=1.2, max_gamma=2.5):
+    """
+    Applies adaptive gamma correction based on image brightness.
+
+    - Computes median pixel intensity to adjust gamma dynamically.
+    - Uses a lookup table for efficient transformation.
+
+    Parameters:
+        image (numpy.ndarray): 8-bit grayscale image.
+        min_gamma (float): Minimum gamma value for bright images.
+        max_gamma (float): Maximum gamma value for dark images.
+
+    Returns:
+        numpy.ndarray: Gamma-corrected image.
+    """
+
+    # Compute median intensity (brightness reference)
+    median_intensity = np.median(image)
+
+    # Normalize intensity range (0-255 → 0-1)
+    norm_intensity = median_intensity / 255.0
+
+    # Adjust gamma adaptively: Darker images get higher gamma, brighter ones get lower gamma
+    gamma = max_gamma - (max_gamma - min_gamma) * norm_intensity
+
+    # Avoid extreme values (ensure gamma is within range)
+    gamma = np.clip(gamma, min_gamma, max_gamma)
+
+    print(f"Applying Gamma Correction with γ = {gamma:.2f}")
+
+    # Compute lookup table for fast transformation
+    lookup_table = np.array([((i / 255.0) ** (1.0 / gamma)) * 255 for i in range(256)]).astype("uint8")
+
+    # Apply gamma correction using the lookup table
+    corrected_image = cv2.LUT(image, lookup_table)
+
+    return corrected_image
+
+
+
 # === LOAD IMAGE ===
 image = skio.imread(image_path)
 print(f"Original Image: dtype={image.dtype}, shape={image.shape}")
 
-# === CROP IMAGE (IF ENABLED) ===
-if CROP_IMAGE:
-    h, w = image.shape[:2]
-    image = image[5*h//8: 6*h//8, 4*w//8: 5*w//8]  # Cropping to focus on region of interest.
-    print(f"Cropped Image Shape: {image.shape}")
-
-# === HANDLE IMAGE FORMAT ===
+# === HANDLE RGBA IMAGES ===
 if image.ndim == 3 and image.shape[-1] == 4:
-    image = image[:, :, :3]  # Remove alpha channel if present.
+    image = image[:, :, :3]  # Remove alpha channel
     print("Removed alpha channel.")
 
+# === CONVERT 16-BIT TO 8-BIT ===
 if image.dtype == np.uint16:
-    image = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    image = convert_16bit_to_8bit(image)
+    cv2.imwrite("cell_image_8bit.tif", image)
     print("Converted 16-bit image to 8-bit.")
 
+# === CONVERT TO GRAYSCALE ===
 if image.ndim == 3:
     image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
     print("Converted image to grayscale.")
 
-# Save preprocessed image
-skio.imsave(os.path.join(output_dir, "01_preprocessed_image.png"), image)
+# === CROP IMAGE ===
+if CROP_IMAGE:
+    h, w = image.shape
+    image = image[5*h//8: 6*h//8, 4*w//8 : 5*w//8]
+    print(f"Cropped Image Shape: {image.shape}")
 
-# === UPSCALE IMAGE (IF ENABLED) ===
+
+# === UPSCALE IMAGE ===
 if UPSCALE_FACTOR > 1:
     image = cv2.resize(image, None, fx=UPSCALE_FACTOR, fy=UPSCALE_FACTOR, interpolation=cv2.INTER_LINEAR)
-    skio.imsave(os.path.join(output_dir, "02_upscaled_image.png"), image)
+    print(f"Upscaled Image Shape: {image.shape}")
 
-# # === DENOISING (Preserve fine details) ===
-# sigma_est = np.mean(estimate_sigma(image))  # Estimate noise level.
-# image = denoise_nl_means(image, h=1.15 * sigma_est, fast_mode=True, patch_size=5, patch_distance=6, preserve_range=True)
-# image = (image * 255).astype(np.uint8)  # Convert back to 8-bit format.
-#
-# # Save denoised image
-# skio.imsave(os.path.join(output_dir, "03_denoised_image.png"), image)
-#
-# # === ADAPTIVE BACKGROUND REMOVAL ===
-# background = cv2.medianBlur(image, 15)  # Smaller kernel prevents excessive subtraction.
-# image = cv2.subtract(image, background)  # Subtract background adaptively.
-# image = cv2.addWeighted(image, 1.2, background, -0.2, 0)  # Adjust intensity to retain dim structures.
-#
-# # Save background-removed image
-# skio.imsave(os.path.join(output_dir, "04_background_removed.png"), image)
+# === SAVE PREPROCESSED IMAGE ===
+preprocessed_image_path = os.path.join(output_dir, "preprocessed_image.png")
+skio.imsave(preprocessed_image_path, image)
+print(f"Saved preprocessed grayscale image: {preprocessed_image_path}")
+
+# === PRINT IMAGE STATS ===
+print(f"Image min: {image.min()}, max: {image.max()}, mean: {image.mean()}")
 
 # === CONTRAST ENHANCEMENT (CLAHE) ===
-print("Applying CLAHE for contrast correction.")
-clahe = cv2.createCLAHE(clipLimit=6.0, tileGridSize=(8, 8))  # Moderate contrast adjustment.
+clahe = cv2.createCLAHE(clipLimit=5.0, tileGridSize=(8, 8))
 image = clahe.apply(image)
 
-# Save contrast-enhanced image
-skio.imsave(os.path.join(output_dir, "05_contrast_enhanced.png"), image)
+contrast_enhanced_image_path = os.path.join(output_dir, "contrast_enhanced_image.png")
+skio.imsave(contrast_enhanced_image_path, image)
+print(f"Saved contrast_enhanced grayscale image: {contrast_enhanced_image_path}")
+
+# === ENHANCE DIM REGIONS ===
+if enhance_dim:
+    image = adaptive_gamma_correction(image, min_gamma = 1.2, max_gamma=1.5)
+
+    gamma_corrected_image_path = os.path.join(output_dir, "gamma_corrected_image.png")
+    skio.imsave(gamma_corrected_image_path, image)
+    print(f"Saved gamma_corrected grayscale image: {gamma_corrected_image_path}")
 
 
+# === RUN CELLPOSE SEGMENTATION ===
+model = models.Cellpose(model_type="nuclei",gpu=torch.cuda.is_available())
 
-# === COMPUTE DISTANCE TRANSFORM (For Watershed) ===
+masks, flows, styles, diams = model.eval( # TODO maybe add chucks and depth
+    image,
+    diameter=5 * UPSCALE_FACTOR,  # Approximate average nucleus size in pixels.
+    # Larger values make Cellpose detect bigger objects,
+    # while smaller values detect finer details.
 
-# Step 1: Create a more robust binary mask using adaptive thresholding.
-binary_mask = cv2.adaptiveThreshold(
-    image, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 21, 5
+    channels=[0, 0],  # Specifies that the input is a **single-channel grayscale image**.
+    # First value: The channel containing nuclei (0 = grayscale).
+    # Second value: Optional cytoplasm channel (0 = none, used for multi-channel images).
+
+    flow_threshold=0.9,  # **Controls boundary sharpness**.
+    # Higher values (closer to 1) enforce well-defined edges,
+    # making the model stricter in separating touching cells.
+    # Lower values (e.g., 0.4-0.6) allow more flexible boundaries
+    # but might cause over-segmentation.
+
+    cellprob_threshold=-4,  # **Adjusts sensitivity to dim nuclei**.
+    # Lower values (e.g., -4) force detection of **low-intensity nuclei**,
+    # which is useful for weakly stained or dim cells.
+    # Higher values (e.g., 0-2) require **stronger nuclear signals**,
+    # potentially missing dim structures.
 )
 
-# Step 2: Compute distance transform on the binary mask.
-dist_transform = distance_transform_edt(binary_mask)
+# === SAVE MASK IMAGE ===
+mask_path = os.path.join(output_dir, "segmentation_mask.png")
+skio.imsave(mask_path, masks.astype(np.uint16))  # Save as 16-bit mask
 
-# Step 3: Normalize distance transform to maintain nuclei structure.
-dist_transform = cv2.normalize(dist_transform, None, 0, 255, cv2.NORM_MINMAX)
+# === NORMALIZE & SAVE MASK FOR VISUALIZATION ===
+# The original `masks` array contains integer labels for segmented objects (cells),
+# where each unique value represents a different cell.
+# However, these values are **not** in the 0-255 grayscale range, making it
+# difficult to visualize directly.
 
-# Step 4: Apply Gaussian blur to prevent oversized regions.
-dist_transform = cv2.GaussianBlur(dist_transform.astype(np.uint8), (3, 3), 0)
+# Step 1: Normalize the mask to 0-255 for visualization.
+# - `masks.max()` gives the highest label value in the mask.
+# - Dividing by `masks.max()` scales all labels to the 0-1 range.
+# - Multiplying by 255 brings it to 8-bit grayscale format (0-255).
+# - `astype(np.uint8)` ensures it is saved correctly as an 8-bit image.
+normalized_mask = (masks / masks.max() * 255).astype(np.uint8) if masks.max() > 0 else masks
 
-# Save fixed distance transform image.
-skio.imsave(os.path.join(output_dir, "06_distance_transform.png"), dist_transform)
+# Step 2: Save the normalized mask image.
+# This allows visualization in standard image viewers, which expect 8-bit images.
+cv2.imwrite(os.path.join(output_dir, "segmentation_mask_visual.png"), normalized_mask)
 
-# === GENERATE FOREGROUND & BACKGROUND MASKS ===
 
-# Create a refined foreground mask by thresholding the distance map.
-_, foreground = cv2.threshold(dist_transform, 30, 255, cv2.THRESH_BINARY)
+# === CREATE & SAVE MASK OVERLAY ===
+mask_overlay = plot.mask_overlay(image, masks, colors=np.random.rand(np.max(masks) + 1, 3))
+overlay_path = os.path.join(output_dir, "mask_overlay.png")
+skio.imsave(overlay_path, (mask_overlay * 255).astype(np.uint8))
+print(f"Saved mask overlay: {overlay_path}")
 
-# Reduce background expansion (prevent oversized regions).
-kernel = np.ones((2, 2), np.uint8)  # Smaller kernel prevents over-expansion.
-background = cv2.dilate(foreground, kernel, iterations=1)
 
-# Erode to separate overlapping nuclei before watershed.
-background = cv2.erode(background, kernel, iterations=1)
+# === DISPLAY FINAL OUTPUT: ALL KEY IMAGES ===
+fig, axes = plt.subplots(2, 2, figsize=(12, 12))  # 2x2 grid for final output
 
-# Save refined background mask.
-skio.imsave(os.path.join(output_dir, "07_background_mask.png"), background)
+# Load images for display
+preprocessed_image = skio.imread(preprocessed_image_path)
+contrast_enhanced_image = skio.imread(contrast_enhanced_image_path)
 
-# === WATERSHED SEGMENTATION ===
+if enhance_dim:
+    gamma_corrected_image = skio.imread(gamma_corrected_image_path)
 
-# Compute unknown regions and markers for watershed.
-unknown = cv2.subtract(background, foreground)
-_, markers = cv2.connectedComponents(foreground)
+# Display images
+axes[0, 0].imshow(preprocessed_image, cmap="gray")
+axes[0, 0].set_title("Preprocessed 8-bit Image")
+axes[0, 0].axis("off")
 
-# Increment marker values for separation.
-markers = markers + 1
-markers[unknown == 255] = 0
+axes[0, 1].imshow(contrast_enhanced_image, cmap="gray")
+axes[0, 1].set_title("Contrast Enhanced Enhanced Image")
+axes[0, 1].axis("off")
 
-# Apply watershed with refined distance transform.
-watershed_labels = watershed(-dist_transform, markers, mask=image)
+if enhance_dim:
+    axes[1, 0].imshow(gamma_corrected_image, cmap="gray")
+    axes[1, 0].set_title("Gamma Corrected Image")
+    axes[1, 0].axis("off")
 
-# Save watershed labels
-skio.imsave(os.path.join(output_dir, "08_watershed_labels.png"), watershed_labels.astype(np.uint8))
+axes[1, 1].imshow(mask_overlay)
+axes[1, 1].set_title("Cellpose Segmentation Overlay")
+axes[1, 1].axis("off")
 
-# === SEGMENTATION ===
-model = models.Cellpose(model_type='nuclei', gpu=torch.cuda.is_available())
-masks, _, _, _ = model.eval(image, diameter=5 * UPSCALE_FACTOR, channels=[0, 0], flow_threshold=0.9, cellprob_threshold=-4, resample=True)
+plt.tight_layout()
+final_output_path = os.path.join(output_dir, "final_output_summary.png")
+plt.savefig(final_output_path, dpi=300)
+plt.show()
 
-# Save segmentation mask
-skio.imsave(os.path.join(output_dir, "09_segmentation_mask.png"), masks.astype(np.uint16))
-
-# === FEATURE EXTRACTION ===
-labeled_mask = label(masks)
-props = regionprops_table(labeled_mask, intensity_image=image, properties=['area', 'perimeter', 'mean_intensity'])
-cell_sizes = props["area"]
-valid_indices = props["perimeter"] > 5
-cell_circularities = np.zeros_like(cell_sizes, dtype=np.float32)
-cell_circularities[valid_indices] = (4 * np.pi * props["area"][valid_indices] / (props["perimeter"][valid_indices] ** 2))
-cell_circularities[(cell_circularities < 0) | (cell_circularities > 1)] = np.nan
-mean_intensities = props["mean_intensity"]
-
-# === POST-PROCESSING ===
-valid_cells = (cell_sizes > 10) & (cell_sizes < 500)
-valid_labels = np.where(valid_cells)[0] + 1
-filtered_masks = np.isin(masks, valid_labels).astype(np.uint8) * masks
-
-# Apply morphological operations to refine segmentation
-filtered_masks = cv2.morphologyEx(filtered_masks.astype(np.uint8), cv2.MORPH_CLOSE, kernel)
-filtered_masks = cv2.dilate(filtered_masks, kernel, iterations=1)
-
-# Save final processed mask
-skio.imsave(os.path.join(output_dir, "10_postprocessed_mask.png"), filtered_masks.astype(np.uint16))
-
-# === DISPLAY CELL STATS ===
-print(f"Detected {len(cell_sizes)} cells.")
-if len(cell_sizes) > 0:
-    print(f"Average cell size: {np.mean(cell_sizes):.2f} pixels.")
-    print(f"Average circularity: {np.nanmean(cell_circularities):.2f}")
-    print(f"Average intensity: {np.mean(mean_intensities):.2f}")
-else:
-    print("No cells detected, try adjusting segmentation thresholds.")
+print(f"Saved final output summary: {final_output_path}")

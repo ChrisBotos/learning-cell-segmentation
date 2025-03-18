@@ -24,9 +24,6 @@ print(f"Using device: {torch_device}")
 if torch.cuda.is_available():
     print("GPU name:", torch.cuda.get_device_name(0))
 
-import numpy as np
-import cv2
-
 
 def convert_16bit_to_8bit(image):
     """
@@ -59,9 +56,6 @@ def convert_16bit_to_8bit(image):
 
     return image_8bit
 
-
-import numpy as np
-import cv2
 
 def adaptive_gamma_correction(image, min_gamma=1.2, max_gamma=2.5):
     """
@@ -138,6 +132,7 @@ if UPSCALE_FACTOR > 1:
 # === SAVE PREPROCESSED IMAGE ===
 gray_image_path = os.path.join(output_dir, "preprocessed_image.png")
 skio.imsave(gray_image_path, image)
+preprocessed_image = image
 print(f"Saved preprocessed grayscale image: {gray_image_path}")
 
 # === PRINT IMAGE STATS ===
@@ -155,7 +150,7 @@ if enhance_dim:
 # === RUN CELLPOSE SEGMENTATION ===
 model = models.Cellpose(model_type="nuclei",gpu=torch.cuda.is_available())
 
-masks, flows, styles, diams = model.eval(
+masks, flows, styles, diams = model.eval( # TODO maybe add chucks and depth
     image,
     diameter=5 * UPSCALE_FACTOR,  # Approximate average nucleus size in pixels.
     # Larger values make Cellpose detect bigger objects,
@@ -209,8 +204,8 @@ print(f"Saved mask overlay: {overlay_path}")
 # === DISPLAY RESULTS ===
 plt.figure(figsize=(12, 6))
 plt.subplot(1, 2, 1)
-plt.imshow(image, cmap="gray")
-plt.title("Processed DAPI Image")
+plt.imshow(preprocessed_image, cmap="gray")
+plt.title("Preprocessed DAPI Image")
 plt.axis("off")
 
 plt.subplot(1, 2, 2)
