@@ -222,7 +222,7 @@ props = regionprops_table(labeled_mask, intensity_image=image,
                           properties=['area', 'perimeter', 'mean_intensity'])
 
 cell_sizes = props["area"]
-valid_indices = props["perimeter"] > 5  # Ignore objects with tiny perimeters
+valid_indices = props["perimeter"] > 0  # Ignore objects with tiny perimeters
 cell_circularities = np.zeros_like(cell_sizes, dtype=np.float32)
 cell_circularities[valid_indices] = (
     4 * np.pi * props["area"][valid_indices] / (props["perimeter"][valid_indices] ** 2)
