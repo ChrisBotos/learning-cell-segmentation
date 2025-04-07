@@ -4,17 +4,23 @@ import torch
 import cv2
 import matplotlib.pyplot as plt
 from skimage import io as skio
-from skimage.measure import regionprops_table, label
 from cellpose import models, plot
+
+import pandas as pd
+from skimage.measure import regionprops, shannon_entropy, label
+from scipy.spatial.distance import pdist, squareform
 
 # === SETTINGS ===
 UPSCALE_FACTOR = 1  # Set >1 to upscale (e.g., 2 for 2× zoom), or 1 for no upscaling
 CROP_IMAGE = True
+enhance_contrast = True
 enhance_dim = True
-image_path = "DAPI_bIRI2.tif"
+image_path = "/exports/archive/hg-funcgenom-research/IRI_multimodal_project/Stereo-seq_IRI/IRI_regist.tif"
+
+CLAHE_tile_grid_size = (16, 16)
 
 # === SETUP OUTPUT DIRECTORY ===
-output_dir = "results"
+output_dir = "iri_results_quarter4"
 os.makedirs(output_dir, exist_ok=True)
 
 # === GPU CHECK ===
@@ -57,10 +63,7 @@ def convert_16bit_to_8bit(image):
     return image_8bit
 
 
-import numpy as np
-import cv2
-
-def adaptive_gamma_correction(image, min_gamma=1.2, max_gamma=2.5):
+def adaptive_gamma_correction(image, min_gamma=1.5, max_gamma=2.5):
     """
     Applies adaptive gamma correction based on image brightness.
 
@@ -99,7 +102,6 @@ def adaptive_gamma_correction(image, min_gamma=1.2, max_gamma=2.5):
     return corrected_image
 
 
-
 # === LOAD IMAGE ===
 image = skio.imread(image_path)
 print(f"Original Image: dtype={image.dtype}, shape={image.shape}")
@@ -123,9 +125,8 @@ if image.ndim == 3:
 # === CROP IMAGE ===
 if CROP_IMAGE:
     h, w = image.shape
-    image = image[5*h//8: 6*h//8, 4*w//8 : 5*w//8]
+    image = image[int(12 * h // 16): int(16 * h // 16), int(12 * w // 16): int(16 * w // 16)]
     print(f"Cropped Image Shape: {image.shape}")
-
 
 # === UPSCALE IMAGE ===
 if UPSCALE_FACTOR > 1:
@@ -141,28 +142,31 @@ print(f"Saved preprocessed grayscale image: {preprocessed_image_path}")
 print(f"Image min: {image.min()}, max: {image.max()}, mean: {image.mean()}")
 
 # === CONTRAST ENHANCEMENT (CLAHE) ===
-clahe = cv2.createCLAHE(clipLimit=5.0, tileGridSize=(8, 8))
-image = clahe.apply(image)
+if enhance_contrast:
+    clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=CLAHE_tile_grid_size)
+    image = clahe.apply(image)
 
-contrast_enhanced_image_path = os.path.join(output_dir, "contrast_enhanced_image.png")
-skio.imsave(contrast_enhanced_image_path, image)
-print(f"Saved contrast_enhanced grayscale image: {contrast_enhanced_image_path}")
+    contrast_enhanced_image_path = os.path.join(output_dir, "contrast_enhanced_image.png")
+    skio.imsave(contrast_enhanced_image_path, image)
+    print(f"Saved contrast_enhanced grayscale image: {contrast_enhanced_image_path}")
 
 # === ENHANCE DIM REGIONS ===
 if enhance_dim:
-    image = adaptive_gamma_correction(image, min_gamma = 1.2, max_gamma=1.5)
+    image = adaptive_gamma_correction(image, min_gamma=1.2, max_gamma=1.5)
 
     gamma_corrected_image_path = os.path.join(output_dir, "gamma_corrected_image.png")
     skio.imsave(gamma_corrected_image_path, image)
     print(f"Saved gamma_corrected grayscale image: {gamma_corrected_image_path}")
 
-
 # === RUN CELLPOSE SEGMENTATION ===
-model = models.Cellpose(model_type="nuclei",gpu=torch.cuda.is_available())
+model = models.Cellpose(model_type="nuclei", gpu=torch.cuda.is_available())
 
-masks, flows, styles, diams = model.eval( # TODO maybe add chucks and depth
+# Invert the image if needed (bright nuclei on dark background).
+# image = 255 - image
+
+masks, flows, styles, diams = model.eval(  # TODO maybe add chucks and depth
     image,
-    diameter=5 * UPSCALE_FACTOR,  # Approximate average nucleus size in pixels.
+    diameter=8 * UPSCALE_FACTOR,  # Approximate average nucleus size in pixels.
     # Larger values make Cellpose detect bigger objects,
     # while smaller values detect finer details.
 
@@ -176,11 +180,14 @@ masks, flows, styles, diams = model.eval( # TODO maybe add chucks and depth
     # Lower values (e.g., 0.4-0.6) allow more flexible boundaries
     # but might cause over-segmentation.
 
-    cellprob_threshold=-4,  # **Adjusts sensitivity to dim nuclei**.
+    cellprob_threshold=-9,  # **Adjusts sensitivity to dim nuclei**.
     # Lower values (e.g., -4) force detection of **low-intensity nuclei**,
     # which is useful for weakly stained or dim cells.
     # Higher values (e.g., 0-2) require **stronger nuclear signals**,
     # potentially missing dim structures.
+
+    resample=True,
+    stitch_threshold=0
 )
 
 # === SAVE MASK IMAGE ===
@@ -204,20 +211,30 @@ normalized_mask = (masks / masks.max() * 255).astype(np.uint8) if masks.max() > 
 # This allows visualization in standard image viewers, which expect 8-bit images.
 cv2.imwrite(os.path.join(output_dir, "segmentation_mask_visual.png"), normalized_mask)
 
-
 # === CREATE & SAVE MASK OVERLAY ===
+# Load the preprocessed image before CLAHE/gamma for overlay.
+original_preprocessed_image = skio.imread(preprocessed_image_path)
+
 mask_overlay = plot.mask_overlay(image, masks, colors=np.random.rand(np.max(masks) + 1, 3))
+
 overlay_path = os.path.join(output_dir, "mask_overlay.png")
 skio.imsave(overlay_path, (mask_overlay * 255).astype(np.uint8))
 print(f"Saved mask overlay: {overlay_path}")
 
+fig = plt.figure()
+plot.show_segmentation(fig=fig, img=image, maski=masks, flowi=flows[0], channels=[0, 0])
+fig.savefig(os.path.join(output_dir, "segmentation_debug.png"), dpi=300)
 
 # === DISPLAY FINAL OUTPUT: ALL KEY IMAGES ===
-fig, axes = plt.subplots(2, 2, figsize=(12, 12))  # 2x2 grid for final output
+print(f"Detected {np.max(masks)} cells")
+
+fig, axes = plt.subplots(2, 2, figsize=(12, 12))  # 2x2 grid for final output.
 
 # Load images for display
 preprocessed_image = skio.imread(preprocessed_image_path)
-contrast_enhanced_image = skio.imread(contrast_enhanced_image_path)
+
+if enhance_contrast:
+    contrast_enhanced_image = skio.imread(contrast_enhanced_image_path)
 
 if enhance_dim:
     gamma_corrected_image = skio.imread(gamma_corrected_image_path)
@@ -227,14 +244,15 @@ axes[0, 0].imshow(preprocessed_image, cmap="gray")
 axes[0, 0].set_title("Preprocessed 8-bit Image")
 axes[0, 0].axis("off")
 
-axes[0, 1].imshow(contrast_enhanced_image, cmap="gray")
+if enhance_contrast:
+    axes[0, 1].imshow(contrast_enhanced_image, cmap="gray")
 axes[0, 1].set_title("Contrast Enhanced Enhanced Image")
 axes[0, 1].axis("off")
 
 if enhance_dim:
     axes[1, 0].imshow(gamma_corrected_image, cmap="gray")
-    axes[1, 0].set_title("Gamma Corrected Image")
-    axes[1, 0].axis("off")
+axes[1, 0].set_title("Gamma Corrected Image")
+axes[1, 0].axis("off")
 
 axes[1, 1].imshow(mask_overlay)
 axes[1, 1].set_title("Cellpose Segmentation Overlay")
@@ -246,3 +264,84 @@ plt.savefig(final_output_path, dpi=300)
 plt.show()
 
 print(f"Saved final output summary: {final_output_path}")
+
+# --- Extract Features for Each Nucleus ---
+
+# Use the segmentation mask (masks) and the processed intensity image (image)
+regions = regionprops(masks, intensity_image=image)
+results = []
+
+for region in regions:
+    area = region.area
+    perimeter = region.perimeter
+    major_axis_length = region.major_axis_length
+    minor_axis_length = region.minor_axis_length
+    # Circularity: 4*pi*area / (perimeter^2)
+    circularity = 4 * np.pi * area / (perimeter ** 2) if perimeter > 0 else np.nan
+    eccentricity = region.eccentricity
+    solidity = region.solidity
+    mean_intensity = region.mean_intensity
+    intensity_std = np.std(region.intensity_image)
+    # Feret Diameter (if available; otherwise, set as nan)
+    try:
+        feret_diameter = region.feret_diameter_max
+    except AttributeError:
+        feret_diameter = np.nan
+    # Roughness Index: a crude measure (perimeter divided by square root of area)
+    roughness_index = perimeter / np.sqrt(area) if area > 0 else np.nan
+    # Texture Entropy: using Shannon entropy on the region's intensity image
+    texture_entropy = shannon_entropy(region.intensity_image)
+
+    results.append({
+        "Nucleus Area": area,
+        "Nucleus Perimeter": perimeter,
+        "Nucleus Major Axis Length": major_axis_length,
+        "Nucleus Minor Axis Length": minor_axis_length,
+        "Nucleus Circularity": circularity,
+        "Nucleus Eccentricity": eccentricity,
+        "Nucleus Solidity": solidity,
+        "Nucleus Intensity Mean": mean_intensity,
+        "Nucleus Intensity Standard Deviation": intensity_std,
+        "Nucleus Feret Diameter": feret_diameter,
+        "Nucleus Roughness Index": roughness_index,
+        "Nucleus Texture Entropy": texture_entropy,
+    })
+
+df = pd.DataFrame(results)
+
+# --- Compute Nuclei Concentration ---
+# (Average nearest-neighbor distance between centroids)
+centroids = np.array([region.centroid for region in regions])
+if len(centroids) > 1:
+    dist_matrix = squareform(pdist(centroids))
+    # Exclude self-distances by setting diagonal to infinity
+    np.fill_diagonal(dist_matrix, np.inf)
+    nearest_neighbor_distances = np.min(dist_matrix, axis=1)
+    nuclei_concentration = np.mean(nearest_neighbor_distances)
+
+else:
+    nuclei_concentration = np.nan
+
+df["Nuclei Concentration"] = nuclei_concentration
+
+# --- Save the Parameters to a Text File ---
+params_txt = os.path.join(output_dir, "segmentation_parameters.txt")
+with open(params_txt, "w") as f:
+    f.write(df.to_string(index=False))
+
+print(f"Saved segmentation parameters to {params_txt}")
+
+# Calculate mean and median for each parameter
+mean_values = df.mean()
+median_values = df.median()
+
+# Combine mean and median into a single DataFrame for clarity
+summary_df = pd.DataFrame({'Mean': mean_values, 'Median': median_values})
+
+# Define the output directory and file path
+summary_file_path = os.path.join(output_dir, "summary_statistics.txt")
+
+# Save the summary statistics to a text file
+summary_df.to_csv(summary_file_path, sep='\t', index=True)
+
+print(f"Saved summary statistics to {summary_file_path}")
